@@ -1,11 +1,16 @@
 import streamlit as st
 import os
+import json
+from datetime import datetime
 from PIL import Image
 from pypdf import PdfReader
 from google import genai
 from google.genai import types
 
-# Sayfa yapılandırması
+# Firebase Admin SDK
+import firebase_admin
+from firebase_admin import credentials, firestore
+
 st.set_page_config(
     page_title="EE Mühendislik Asistanı Pro",
     page_icon="⚡",
@@ -23,104 +28,164 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-st.title("⚡ Elektrik-Elektronik Mühendisi Asistanı (Pro)")
-st.caption("Devre analizi, şema/görsel yorumlama ve teknik datasheet (RAG) danışmanı.")
+# ----------------- 1. FIREBASE BAĞLANTISI -----------------
+@st.cache_resource
+def init_firebase():
+    if not firebase_admin._apps:
+        # Canlı sunucu için Streamlit Secrets kontrolü
+        if "FIREBASE_KEY" in st.secrets:
+            try:
+                # Secrets içindeki TOML stringini veya dict yapısını parse et
+                key_data = st.secrets["FIREBASE_KEY"]
+                if isinstance(key_data, str):
+                    key_dict = json.loads(key_data)
+                else:
+                    key_dict = dict(key_data)
+                cred = credentials.Certificate(key_dict)
+            except Exception as e:
+                st.error(f"Firebase anahtarı çözümlenemedi: {e}")
+                st.stop()
+        # Yerel test dosyası kontrolü
+        elif os.path.exists("firebase_key.json"):
+            cred = credentials.Certificate("firebase_key.json")
+        else:
+            st.error("Firebase anahtarı bulunamadı! Lütfen Streamlit Secrets alanına FIREBASE_KEY tanımlayın.")
+            st.stop()
+        firebase_admin.initialize_app(cred)
+    return firestore.client()
 
-# API Anahtarı kontrolü (Streamlit Secrets / Ortam Değişkeni)
+db = init_firebase()
+
+# ----------------- 2. GOOGLE CLIENT -----------------
 api_key = os.environ.get("GOOGLE_API_KEY")
 if not api_key:
-    # Streamlit Cloud'da Secrets doğrudan st.secrets altından da okunabilir
     if "GOOGLE_API_KEY" in st.secrets:
         api_key = st.secrets["GOOGLE_API_KEY"]
     else:
-        st.error("API Anahtarı bulunamadı. Lütfen Streamlit Secrets alanına GOOGLE_API_KEY tanımlayın.")
+        st.error("GOOGLE_API_KEY bulunamadı. Lütfen Streamlit Secrets alanına tanımlayın.")
         st.stop()
 
 client = genai.Client(api_key=api_key)
 
-# ----------------- SOL MENÜ: DOSYA YÜKLEME ALANI -----------------
+# ----------------- 3. SIDEBAR: KULLANICI, GEÇMİŞ & ARAÇLAR -----------------
 with st.sidebar:
+    st.header("👤 Kullanıcı Profili")
+    username = st.text_input("Kullanıcı Adınız", value="muhendis_1").strip().lower()
+    
+    st.divider()
+    st.header("💬 Sohbet Geçmişi")
+    
+    if st.button("➕ Yeni Sohbet Başlat", use_container_width=True):
+        st.session_state.current_chat_id = f"chat_{int(datetime.now().timestamp())}"
+        st.session_state.messages = []
+        st.session_state.GOOGLE_history = []
+        st.rerun()
+
+    # Firestore'dan kullanıcının geçmiş sohbetlerini listele
+    chats_ref = db.collection("users").document(username).collection("chats").order_by("created_at", direction=firestore.Query.DESCENDING)
+    saved_chats = list(chats_ref.stream())
+
+    chat_titles = {}
+    for c in saved_chats:
+        data = c.to_dict()
+        chat_titles[c.id] = data.get("title", "İsimsiz Sohbet")
+
+    # Aktif sohbet ID'sini belirle
+    if "current_chat_id" not in st.session_state:
+        if saved_chats:
+            st.session_state.current_chat_id = saved_chats[0].id
+        else:
+            st.session_state.current_chat_id = f"chat_{int(datetime.now().timestamp())}"
+
+    # Sohbet listesi butonları
+    for c_id, title in chat_titles.items():
+        button_label = f"📌 {title[:25]}" if c_id == st.session_state.current_chat_id else title[:25]
+        if st.button(button_label, key=c_id, use_container_width=True):
+            st.session_state.current_chat_id = c_id
+            st.session_state.messages = []
+            st.session_state.GOOGLE_history = []
+            st.rerun()
+
+    st.divider()
     st.header("📁 Mühendislik Araçları")
-    
-    # 1. Devre Şeması / PCB Görseli Yükleme
-    st.subheader("🖼️ Devre / Şema Analizi")
-    uploaded_image = st.file_uploader("Görsel Yükle (PNG, JPG)", type=["png", "jpg", "jpeg"])
+    uploaded_image = st.file_uploader("Görsel Yükle (Devre / Şema)", type=["png", "jpg", "jpeg"])
     if uploaded_image:
-        image_preview = Image.open(uploaded_image)
-        st.image(image_preview, caption="Yüklenen Devre Görseli", use_container_width=True)
-    
-    # 2. PDF / Datasheet Yükleme (RAG)
-    st.subheader("📄 Datasheet / Not Yükle (PDF)")
-    uploaded_pdf = st.file_uploader("Teknik Döküman (PDF)", type=["pdf"])
+        st.image(Image.open(uploaded_image), caption="Yüklenen Görsel", use_container_width=True)
+
+    uploaded_pdf = st.file_uploader("Datasheet Yükle (PDF)", type=["pdf"])
     pdf_text_context = ""
     if uploaded_pdf:
-        with st.spinner("PDF dökümanı okunuyor ve analiz ediliyor..."):
+        with st.spinner("PDF taranıyor..."):
             reader = PdfReader(uploaded_pdf)
             for page in reader.pages:
                 text = page.extract_text()
                 if text:
                     pdf_text_context += text + "\n"
-        st.success(f"PDF Yüklendi! ({len(reader.pages)} sayfa döküman aktif)")
+        st.success(f"PDF Yüklendi! ({len(reader.pages)} sayfa)")
 
-# ----------------- SISTEM TALİMATI VE BAĞLAM -----------------
+# ----------------- 4. SOHBET VERİSİNİ YÜKLEME -----------------
+current_chat_ref = db.collection("users").document(username).collection("chats").document(st.session_state.current_chat_id)
+
+if "messages" not in st.session_state or not st.session_state.messages:
+    chat_doc = current_chat_ref.get()
+    if chat_doc.exists:
+        data = chat_doc.to_dict()
+        st.session_state.messages = data.get("messages", [])
+        st.session_state.GOOGLE_history = []
+        for m in st.session_state.messages:
+            role = "user" if m["role"] == "user" else "model"
+            st.session_state.GOOGLE_history.append(
+                types.Content(role=role, parts=[types.Part.from_text(text=m["content"])])
+            )
+    else:
+        st.session_state.messages = []
+        st.session_state.GOOGLE_history = []
+
+# ----------------- 5. ANA EKRAN & TALİMATLAR -----------------
+st.title("⚡ Elektrik-Elektronik Mühendisi Asistanı (Cloud)")
+st.caption(f"Aktif Kullanıcı: **{username}** | Oturum: **{st.session_state.current_chat_id}**")
+
 base_system_instruction = """
 Sen kıdemli bir Elektrik-Elektronik Mühendisi teknik asistanısın. 
 Görevin sadece ve sadece Elektrik-Elektronik Mühendisliği alanındaki konulara (devre analizi, gömülü sistemler, mikrodenetleyiciler, güç elektroniği, kontrol sistemleri, sinyal işleme, PLC, telekomünikasyon vb.) teknik ve analitik bir yaklaşımla yanıt vermektir.
 
 Kurallar:
 1. Yanıtların teknik, formüllere dayalı, mühendislik standartlarına uygun ve analitik olsun.
-2. Kullanıcı devre şeması veya görsel yüklediyse; komponentleri, bağlantı mantığını, olası tasarım hatalarını ve filtreleme yapılarını adım adım açıkla.
-3. Kullanıcı PDF/Datasheet yüklediyse; öncelikle o dökümandaki pin konfigürasyonlarına, elektriksel karakteristiklere ve register tablolarına sadık kalarak cevap ver.
-4. Kullanıcı önceki sorulara veya hesaplamalara atıfta bulunursa geçmiş konuşma bağlamını kullanarak devam et.
-5. Elektrik-elektronik mühendisliği alanı dışındaki (tarih, yemek tarifleri, genel sohbet, magazin, siyaset vb.) hiçbir soruya ASLA cevap verme. Bu tür durumlarda: "Ben yalnızca Elektrik-Elektronik Mühendisliği alanındaki teknik soruları yanıtlamak üzere programlandım." diyerek reddet.
+2. Devre şeması görseli yüklendiyse komponentleri, bağlantı yapısını ve olası hataları adım adım analiz et.
+3. PDF/Datasheet yüklendiyse öncelikle oradaki elektriksel parametrelere ve register/pin tablolarına sadık kalarak cevap ver.
+4. Elektrik-elektronik mühendisliği alanı dışındaki hiçbir soruya ASLA yanıt verme. Bu tip soruları nazikçe reddet.
 """
 
-# PDF içeriğini prompt bağlamına ekleme
 if pdf_text_context:
-    effective_instruction = base_system_instruction + f"\n\n[YÜKLENEN REFERANS DATASHEET / DÖKÜMAN]:\n{pdf_text_context[:40000]}"
+    effective_instruction = base_system_instruction + f"\n\n[REFERANS DATASHEET / NOT]:\n{pdf_text_context[:40000]}"
 else:
     effective_instruction = base_system_instruction
 
-# ----------------- HAFIZA YAPILANDIRMASI -----------------
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-if "GOOGLE_history" not in st.session_state:
-    st.session_state.GOOGLE_history = []
-
-# Mesaj geçmişini ekrana bas
+# Ekrana eski mesajları çiz
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# ----------------- SOHBET DÖNGÜSÜ -----------------
+# ----------------- 6. MESAJ İLETİMİ VE AKIŞ -----------------
 if user_input := st.chat_input("Teknik sorunuzu yazın..."):
-    # Kullanıcı arayüzü bildirimi
     display_text = user_input
     if uploaded_image:
-        display_text = f"🖼️ *[Devre Görseli Eklendi]* {user_input}"
+        display_text = f"🖼️ *[Görsel Eklendi]* {user_input}"
     if uploaded_pdf:
         display_text = f"📄 *[Datasheet Aktif]* {display_text}"
-        
+
     st.session_state.messages.append({"role": "user", "content": display_text})
     with st.chat_message("user"):
         st.markdown(display_text)
 
-    # GOOGLE için girdi parçalarını (parts) hazırlama
     parts = []
-    
-    # Görsel varsa binary olarak ekle
     if uploaded_image:
         img_bytes = uploaded_image.getvalue()
         parts.append(types.Part.from_bytes(data=img_bytes, mime_type=uploaded_image.type))
-    
-    # Metin girdisini ekle
     parts.append(types.Part.from_text(text=user_input))
 
-    # Hafızaya ekle
     st.session_state.GOOGLE_history.append(types.Content(role="user", parts=parts))
 
-    # Canlı akış (Streaming) yanıtı
     with st.chat_message("assistant"):
         def stream_generator():
             response_stream = client.models.generate_content_stream(
@@ -137,11 +202,16 @@ if user_input := st.chat_input("Teknik sorunuzu yazın..."):
 
         full_response = st.write_stream(stream_generator())
 
-    # Model cevabını kaydet
     st.session_state.messages.append({"role": "assistant", "content": full_response})
     st.session_state.GOOGLE_history.append(
-        types.Content(
-            role="model",
-            parts=[types.Part.from_text(text=full_response)]
-        )
+        types.Content(role="model", parts=[types.Part.from_text(text=full_response)])
     )
+
+    # Firestore'a kalıcı kayıt
+    chat_title = user_input[:30] if len(st.session_state.messages) <= 2 else chat_titles.get(st.session_state.current_chat_id, user_input[:30])
+    
+    current_chat_ref.set({
+        "title": chat_title,
+        "created_at": firestore.SERVER_TIMESTAMP,
+        "messages": st.session_state.messages
+    }, merge=True)
