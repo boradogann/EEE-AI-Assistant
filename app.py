@@ -6,6 +6,7 @@ from PIL import Image
 from pypdf import PdfReader
 from google import genai
 from google.genai import types
+from google.genai import errors
 
 # Firebase Admin SDK
 import firebase_admin
@@ -17,7 +18,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Metin akarken sayfanın aşağıya zorla kaymasını engelleyen stil
+# Metin akarken sayfanın aşağıya kaymasını engelleyen stil
 st.markdown(
     """
     <style>
@@ -53,13 +54,13 @@ def init_firebase():
 
 db = init_firebase()
 
-# ----------------- 2. GOOGLE CLIENT -----------------
-api_key = os.environ.get("GOOGLE_API_KEY")
+# ----------------- 2. GEMINI CLIENT -----------------
+api_key = os.environ.get("GEMINI_API_KEY")
 if not api_key:
-    if "GOOGLE_API_KEY" in st.secrets:
-        api_key = st.secrets["GOOGLE_API_KEY"]
+    if "GEMINI_API_KEY" in st.secrets:
+        api_key = st.secrets["GEMINI_API_KEY"].strip()
     else:
-        st.error("GOOGLE_API_KEY bulunamadı. Lütfen Streamlit Secrets alanına tanımlayın.")
+        st.error("GEMINI_API_KEY bulunamadı. Lütfen Streamlit Secrets alanına tanımlayın.")
         st.stop()
 
 client = genai.Client(api_key=api_key)
@@ -83,7 +84,7 @@ with st.sidebar:
         st.session_state.active_username = username_input
         st.query_params["user"] = username_input
         st.session_state.messages = []
-        st.session_state.GOOGLE_history = []
+        st.session_state.gemini_history = []
         st.rerun()
 
     username = st.session_state.active_username
@@ -94,10 +95,9 @@ with st.sidebar:
     if st.button("➕ Yeni Sohbet Başlat", use_container_width=True):
         st.session_state.current_chat_id = f"chat_{int(datetime.now().timestamp())}"
         st.session_state.messages = []
-        st.session_state.GOOGLE_history = []
+        st.session_state.gemini_history = []
         st.rerun()
 
-    # Firestore'dan geçmiş sohbetleri listele
     chats_ref = db.collection("users").document(username).collection("chats").order_by("created_at", direction=firestore.Query.DESCENDING)
     saved_chats = list(chats_ref.stream())
 
@@ -117,7 +117,7 @@ with st.sidebar:
         if st.button(button_label, key=c_id, use_container_width=True):
             st.session_state.current_chat_id = c_id
             st.session_state.messages = []
-            st.session_state.GOOGLE_history = []
+            st.session_state.gemini_history = []
             st.rerun()
 
     st.divider()
@@ -145,15 +145,15 @@ if "messages" not in st.session_state or not st.session_state.messages:
     if chat_doc.exists:
         data = chat_doc.to_dict()
         st.session_state.messages = data.get("messages", [])
-        st.session_state.GOOGLE_history = []
+        st.session_state.gemini_history = []
         for m in st.session_state.messages:
             role = "user" if m["role"] == "user" else "model"
-            st.session_state.GOOGLE_history.append(
+            st.session_state.gemini_history.append(
                 types.Content(role=role, parts=[types.Part.from_text(text=m["content"])])
             )
     else:
         st.session_state.messages = []
-        st.session_state.GOOGLE_history = []
+        st.session_state.gemini_history = []
 
 # ----------------- 5. ANA EKRAN & TALİMATLAR -----------------
 st.title("⚡ Elektrik-Elektronik Mühendisi Asistanı (Cloud)")
@@ -167,7 +167,7 @@ Kurallar:
 1. Yanıtların teknik, formüllere dayalı, mühendislik standartlarına uygun ve analitik olsun.
 2. Devre şeması görseli yüklendiyse komponentleri, bağlantı yapısını ve olası hataları adım adım analiz et.
 3. PDF/Datasheet yüklendiyse öncelikle oradaki elektriksel parametrelere ve register/pin tablolarına sadık kalarak cevap ver.
-4. Elektrik-elektronik mühendisliği alanı dışındaki hiçbir soruya ASLA yanıt verme. Bu tip soruları nazikçe reddet.
+4. Elektrik-elektronik mühendisliği alanı dışındaki hiçbir soruya ASLA yanıt verme.
 """
 
 if pdf_text_context:
@@ -179,7 +179,7 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# ----------------- 6. MESAJ İLETİMİ (STREAMING) -----------------
+# ----------------- 6. MESAJ İLETİMİ (TRY-EXCEPT KORUMALI) -----------------
 if user_input := st.chat_input("Teknik sorunuzu yazın..."):
     display_text = user_input
     if uploaded_image:
@@ -197,33 +197,39 @@ if user_input := st.chat_input("Teknik sorunuzu yazın..."):
         parts.append(types.Part.from_bytes(data=img_bytes, mime_type=uploaded_image.type))
     parts.append(types.Part.from_text(text=user_input))
 
-    st.session_state.GOOGLE_history.append(types.Content(role="user", parts=parts))
+    st.session_state.gemini_history.append(types.Content(role="user", parts=parts))
 
     with st.chat_message("assistant"):
-        def stream_generator():
-            response_stream = client.models.generate_content_stream(
-                model="GOOGLE-2.5-flash",
-                contents=st.session_state.GOOGLE_history,
-                config=types.GenerateContentConfig(
-                    system_instruction=effective_instruction,
-                    temperature=0.2,
+        try:
+            def stream_generator():
+                response_stream = client.models.generate_content_stream(
+                    model="gemini-2.5-flash",
+                    contents=st.session_state.gemini_history,
+                    config=types.GenerateContentConfig(
+                        system_instruction=effective_instruction,
+                        temperature=0.2,
+                    )
                 )
+                for chunk in response_stream:
+                    if chunk.text:
+                        yield chunk.text
+
+            full_response = st.write_stream(stream_generator())
+            
+            st.session_state.messages.append({"role": "assistant", "content": full_response})
+            st.session_state.gemini_history.append(
+                types.Content(role="model", parts=[types.Part.from_text(text=full_response)])
             )
-            for chunk in response_stream:
-                if chunk.text:
-                    yield chunk.text
 
-        full_response = st.write_stream(stream_generator())
+            # Firestore Kaydı
+            chat_title = user_input[:30] if len(st.session_state.messages) <= 2 else chat_titles.get(st.session_state.current_chat_id, user_input[:30])
+            current_chat_ref.set({
+                "title": chat_title,
+                "created_at": firestore.SERVER_TIMESTAMP,
+                "messages": st.session_state.messages
+            }, merge=True)
 
-    st.session_state.messages.append({"role": "assistant", "content": full_response})
-    st.session_state.GOOGLE_history.append(
-        types.Content(role="model", parts=[types.Part.from_text(text=full_response)])
-    )
-
-    chat_title = user_input[:30] if len(st.session_state.messages) <= 2 else chat_titles.get(st.session_state.current_chat_id, user_input[:30])
-    
-    current_chat_ref.set({
-        "title": chat_title,
-        "created_at": firestore.SERVER_TIMESTAMP,
-        "messages": st.session_state.messages
-    }, merge=True)
+        except errors.APIError as e:
+            st.error(f"⚠️ Google API Hatası: {e.message}")
+        except Exception as e:
+            st.error(f"⚠️ Bir hata oluştu: {str(e)}")
