@@ -53,13 +53,13 @@ def init_firebase():
 
 db = init_firebase()
 
-# ----------------- 2. GEMINI CLIENT -----------------
-api_key = os.environ.get("GEMINI_API_KEY")
+# ----------------- 2. GOOGLE CLIENT -----------------
+api_key = os.environ.get("GOOGLE_API_KEY")
 if not api_key:
-    if "GEMINI_API_KEY" in st.secrets:
-        api_key = st.secrets["GEMINI_API_KEY"]
+    if "GOOGLE_API_KEY" in st.secrets:
+        api_key = st.secrets["GOOGLE_API_KEY"]
     else:
-        st.error("GEMINI_API_KEY bulunamadı. Lütfen Streamlit Secrets alanına tanımlayın.")
+        st.error("GOOGLE_API_KEY bulunamadı. Lütfen Streamlit Secrets alanına tanımlayın.")
         st.stop()
 
 client = genai.Client(api_key=api_key)
@@ -83,7 +83,7 @@ with st.sidebar:
         st.session_state.active_username = username_input
         st.query_params["user"] = username_input
         st.session_state.messages = []
-        st.session_state.gemini_history = []
+        st.session_state.GOOGLE_history = []
         st.rerun()
 
     username = st.session_state.active_username
@@ -94,7 +94,7 @@ with st.sidebar:
     if st.button("➕ Yeni Sohbet Başlat", use_container_width=True):
         st.session_state.current_chat_id = f"chat_{int(datetime.now().timestamp())}"
         st.session_state.messages = []
-        st.session_state.gemini_history = []
+        st.session_state.GOOGLE_history = []
         st.rerun()
 
     # Firestore'dan geçmiş sohbetleri listele
@@ -117,7 +117,7 @@ with st.sidebar:
         if st.button(button_label, key=c_id, use_container_width=True):
             st.session_state.current_chat_id = c_id
             st.session_state.messages = []
-            st.session_state.gemini_history = []
+            st.session_state.GOOGLE_history = []
             st.rerun()
 
     st.divider()
@@ -145,15 +145,15 @@ if "messages" not in st.session_state or not st.session_state.messages:
     if chat_doc.exists:
         data = chat_doc.to_dict()
         st.session_state.messages = data.get("messages", [])
-        st.session_state.gemini_history = []
+        st.session_state.GOOGLE_history = []
         for m in st.session_state.messages:
             role = "user" if m["role"] == "user" else "model"
-            st.session_state.gemini_history.append(
+            st.session_state.GOOGLE_history.append(
                 types.Content(role=role, parts=[types.Part.from_text(text=m["content"])])
             )
     else:
         st.session_state.messages = []
-        st.session_state.gemini_history = []
+        st.session_state.GOOGLE_history = []
 
 # ----------------- 5. ANA EKRAN & TALİMATLAR -----------------
 st.title("⚡ Elektrik-Elektronik Mühendisi Asistanı (Cloud)")
@@ -197,13 +197,13 @@ if user_input := st.chat_input("Teknik sorunuzu yazın..."):
         parts.append(types.Part.from_bytes(data=img_bytes, mime_type=uploaded_image.type))
     parts.append(types.Part.from_text(text=user_input))
 
-    st.session_state.gemini_history.append(types.Content(role="user", parts=parts))
+    st.session_state.GOOGLE_history.append(types.Content(role="user", parts=parts))
 
     with st.chat_message("assistant"):
         def stream_generator():
             response_stream = client.models.generate_content_stream(
-                model="gemini-2.5-flash",
-                contents=st.session_state.gemini_history,
+                model="GOOGLE-2.5-flash",
+                contents=st.session_state.GOOGLE_history,
                 config=types.GenerateContentConfig(
                     system_instruction=effective_instruction,
                     temperature=0.2,
@@ -216,7 +216,7 @@ if user_input := st.chat_input("Teknik sorunuzu yazın..."):
         full_response = st.write_stream(stream_generator())
 
     st.session_state.messages.append({"role": "assistant", "content": full_response})
-    st.session_state.gemini_history.append(
+    st.session_state.GOOGLE_history.append(
         types.Content(role="model", parts=[types.Part.from_text(text=full_response)])
     )
 
