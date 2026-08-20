@@ -6,6 +6,7 @@ from PIL import Image
 from pypdf import PdfReader
 from google import genai
 from google.genai import types
+from google.genai import errors
 
 # Firebase Admin SDK
 import firebase_admin
@@ -145,7 +146,7 @@ if "messages" not in st.session_state or not st.session_state.messages:
         st.session_state.messages = []
 
 # ----------------- 5. ANA EKRAN & TALİMATLAR -----------------
-st.title("⚡ Elektrik-Elektronik Mühendisi Asistanı (Pro)")
+st.title("⚡ Elektrik-Elektronik Mühendisi Asistanı")
 st.caption(f"Aktif Kullanıcı: **{username}** | Oturum: **{st.session_state.current_chat_id}**")
 
 base_system_instruction = """
@@ -168,7 +169,7 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# ----------------- 6. MESAJ GÖNDERİMİ VE AKIŞ -----------------
+# ----------------- 6. MESAJ GÖNDERİMİ & HATASIZ AKIŞ -----------------
 if user_input := st.chat_input("Teknik sorunuzu yazın..."):
     display_text = user_input
     if uploaded_image:
@@ -176,47 +177,62 @@ if user_input := st.chat_input("Teknik sorunuzu yazın..."):
     if uploaded_pdf:
         display_text = f"📄 *[Datasheet Aktif]* {display_text}"
 
-    # Kullanıcı mesajını arayüze ekle
-    st.session_state.messages.append({"role": "user", "content": display_text})
+    # Ekrana bas
     with st.chat_message("user"):
         st.markdown(display_text)
 
-    # Gemini için konuşma geçmişini temiz şekilde inşa et
+    # API için geçmişi temizle: Ardışık 'user' veya 'model' mesajlarını filtrele
     gemini_contents = []
-    for msg in st.session_state.messages[:-1]:
+    last_role = None
+    for msg in st.session_state.messages:
         r = "user" if msg["role"] == "user" else "model"
-        gemini_contents.append(types.Content(role=r, parts=[types.Part.from_text(text=msg["content"])]))
+        if r != last_role:
+            gemini_contents.append(types.Content(role=r, parts=[types.Part.from_text(text=msg["content"])]))
+            last_role = r
 
-    # Son mesajı (varsa görseliyle birlikte) ekle
+    # Son kullanıcı mesajını ekle
     current_parts = []
     if uploaded_image:
         current_parts.append(types.Part.from_bytes(data=uploaded_image.getvalue(), mime_type=uploaded_image.type))
     current_parts.append(types.Part.from_text(text=user_input))
+
+    if last_role == "user" and len(gemini_contents) > 0:
+        gemini_contents.pop()  # Önceki cevapsız user mesajı varsa ez
+        
     gemini_contents.append(types.Content(role="user", parts=current_parts))
 
-    # Modelden yanıt akışını al
+    # Yanıt Üretimi
     with st.chat_message("assistant"):
-        def generate_response():
+        try:
             response_stream = client.models.generate_content_stream(
-                model="gemini-2.5-pro",
+                model="gemini-2.0-flash",
                 contents=gemini_contents,
                 config=types.GenerateContentConfig(
                     system_instruction=effective_instruction,
                     temperature=0.2,
                 )
             )
-            for chunk in response_stream:
-                if chunk.text:
-                    yield chunk.text
 
-        full_response = st.write_stream(generate_response())
+            def stream_wrapper():
+                for chunk in response_stream:
+                    if chunk.text:
+                        yield chunk.text
 
-    st.session_state.messages.append({"role": "assistant", "content": full_response})
+            full_response = st.write_stream(stream_wrapper())
 
-    # Firestore Kaydı
-    chat_title = user_input[:30] if len(st.session_state.messages) <= 2 else chat_titles.get(st.session_state.current_chat_id, user_input[:30])
-    current_chat_ref.set({
-        "title": chat_title,
-        "created_at": firestore.SERVER_TIMESTAMP,
-        "messages": st.session_state.messages
-    }, merge=True)
+            # Başarılı olursa hem kullanıcıyı hem asistanı kalıcı listeye yaz
+            st.session_state.messages.append({"role": "user", "content": display_text})
+            st.session_state.messages.append({"role": "assistant", "content": full_response})
+
+            # Firestore Kaydı
+            chat_title = user_input[:30] if len(st.session_state.messages) <= 2 else chat_titles.get(st.session_state.current_chat_id, user_input[:30])
+            current_chat_ref.set({
+                "title": chat_title,
+                "created_at": firestore.SERVER_TIMESTAMP,
+                "messages": st.session_state.messages
+            }, merge=True)
+
+        except errors.APIError as e:
+            st.error(f"Google API Hatası ({e.code}): {e.message}")
+        except Exception as e:
+            st.error(f"Sistem Hatası: {str(e)}")
