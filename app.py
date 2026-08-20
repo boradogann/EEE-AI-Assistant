@@ -32,10 +32,8 @@ st.markdown(
 @st.cache_resource
 def init_firebase():
     if not firebase_admin._apps:
-        # Canlı sunucu için Streamlit Secrets kontrolü
         if "FIREBASE_KEY" in st.secrets:
             try:
-                # Secrets içindeki TOML stringini veya dict yapısını parse et
                 key_data = st.secrets["FIREBASE_KEY"]
                 if isinstance(key_data, str):
                     key_dict = json.loads(key_data)
@@ -45,7 +43,6 @@ def init_firebase():
             except Exception as e:
                 st.error(f"Firebase anahtarı çözümlenemedi: {e}")
                 st.stop()
-        # Yerel test dosyası kontrolü
         elif os.path.exists("firebase_key.json"):
             cred = credentials.Certificate("firebase_key.json")
         else:
@@ -67,10 +64,29 @@ if not api_key:
 
 client = genai.Client(api_key=api_key)
 
-# ----------------- 3. SIDEBAR: KULLANICI, GEÇMİŞ & ARAÇLAR -----------------
+# ----------------- 3. KULLANICI & SOHBET GEÇMİŞİ -----------------
+query_params = st.query_params
+url_user = query_params.get("user", None)
+
+if "active_username" not in st.session_state:
+    st.session_state.active_username = url_user if url_user else "muhendis_1"
+
 with st.sidebar:
     st.header("👤 Kullanıcı Profili")
-    username = st.text_input("Kullanıcı Adınız", value="muhendis_1").strip().lower()
+    
+    username_input = st.text_input(
+        "Kullanıcı Adınız", 
+        value=st.session_state.active_username
+    ).strip().lower()
+
+    if username_input != st.session_state.active_username:
+        st.session_state.active_username = username_input
+        st.query_params["user"] = username_input
+        st.session_state.messages = []
+        st.session_state.GOOGLE_history = []
+        st.rerun()
+
+    username = st.session_state.active_username
     
     st.divider()
     st.header("💬 Sohbet Geçmişi")
@@ -81,7 +97,7 @@ with st.sidebar:
         st.session_state.GOOGLE_history = []
         st.rerun()
 
-    # Firestore'dan kullanıcının geçmiş sohbetlerini listele
+    # Firestore'dan geçmiş sohbetleri listele
     chats_ref = db.collection("users").document(username).collection("chats").order_by("created_at", direction=firestore.Query.DESCENDING)
     saved_chats = list(chats_ref.stream())
 
@@ -90,14 +106,12 @@ with st.sidebar:
         data = c.to_dict()
         chat_titles[c.id] = data.get("title", "İsimsiz Sohbet")
 
-    # Aktif sohbet ID'sini belirle
     if "current_chat_id" not in st.session_state:
         if saved_chats:
             st.session_state.current_chat_id = saved_chats[0].id
         else:
             st.session_state.current_chat_id = f"chat_{int(datetime.now().timestamp())}"
 
-    # Sohbet listesi butonları
     for c_id, title in chat_titles.items():
         button_label = f"📌 {title[:25]}" if c_id == st.session_state.current_chat_id else title[:25]
         if st.button(button_label, key=c_id, use_container_width=True):
@@ -143,7 +157,7 @@ if "messages" not in st.session_state or not st.session_state.messages:
 
 # ----------------- 5. ANA EKRAN & TALİMATLAR -----------------
 st.title("⚡ Elektrik-Elektronik Mühendisi Asistanı (Cloud)")
-st.caption(f"Aktif Kullanıcı: **{username}**")
+st.caption(f"Aktif Kullanıcı: **{username}** | Oturum: **{st.session_state.current_chat_id}**")
 
 base_system_instruction = """
 Sen kıdemli bir Elektrik-Elektronik Mühendisi teknik asistanısın. 
@@ -161,12 +175,11 @@ if pdf_text_context:
 else:
     effective_instruction = base_system_instruction
 
-# Ekrana eski mesajları çiz
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# ----------------- 6. MESAJ İLETİMİ VE AKIŞ -----------------
+# ----------------- 6. MESAJ İLETİMİ (STREAMING) -----------------
 if user_input := st.chat_input("Teknik sorunuzu yazın..."):
     display_text = user_input
     if uploaded_image:
@@ -189,7 +202,7 @@ if user_input := st.chat_input("Teknik sorunuzu yazın..."):
     with st.chat_message("assistant"):
         def stream_generator():
             response_stream = client.models.generate_content_stream(
-                model="GOOGLE-3.6-flash",
+                model="GOOGLE-2.5-flash",
                 contents=st.session_state.GOOGLE_history,
                 config=types.GenerateContentConfig(
                     system_instruction=effective_instruction,
@@ -207,7 +220,6 @@ if user_input := st.chat_input("Teknik sorunuzu yazın..."):
         types.Content(role="model", parts=[types.Part.from_text(text=full_response)])
     )
 
-    # Firestore'a kalıcı kayıt
     chat_title = user_input[:30] if len(st.session_state.messages) <= 2 else chat_titles.get(st.session_state.current_chat_id, user_input[:30])
     
     current_chat_ref.set({
