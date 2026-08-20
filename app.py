@@ -1,6 +1,7 @@
 import streamlit as st
 import os
 import json
+import hashlib
 from datetime import datetime
 from PIL import Image
 from pypdf import PdfReader
@@ -65,33 +66,81 @@ if not api_key:
 
 client = genai.Client(api_key=api_key)
 
-# ----------------- 3. KULLANICI & URL PARAMETRESİ -----------------
-query_params = st.query_params
-url_user = query_params.get("user", None)
+# ----------------- 3. KULLANICI DOĞRULAMA (AUTH) FONKSİYONLARI -----------------
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
 
-if "active_username" not in st.session_state:
-    st.session_state.active_username = url_user if url_user else "muhendis_1"
+if "logged_in_user" not in st.session_state:
+    st.session_state.logged_in_user = None
+
+# GİRİŞ YAPILMAMIŞSA GİRİŞ / KAYIT EKRANI GÖSTER
+if not st.session_state.logged_in_user:
+    st.title("⚡ EE Asistanı - Giriş Paneli")
+    
+    auth_tab1, auth_tab2 = st.tabs(["🔑 Giriş Yap", "📝 Kayıt Ol"])
+    
+    with auth_tab1:
+        st.subheader("Oturum Aç")
+        login_user = st.text_input("Kullanıcı Adı", key="login_u").strip().lower()
+        login_pass = st.text_input("Şifre", type="password", key="login_p")
+        
+        if st.button("Giriş Yap", use_container_width=True, type="primary"):
+            if not login_user or not login_pass:
+                st.warning("Lütfen kullanıcı adı ve şifrenizi girin.")
+            else:
+                user_doc = db.collection("users").document(login_user).get()
+                if user_doc.exists:
+                    stored_hash = user_doc.to_dict().get("password_hash")
+                    if stored_hash == hash_password(login_pass):
+                        st.session_state.logged_in_user = login_user
+                        st.success("Giriş başarılı!")
+                        st.rerun()
+                    else:
+                        st.error("Hatalı şifre girdiniz.")
+                else:
+                    st.error("Bu kullanıcı adı bulunamadı. Lütfen kayıt olun.")
+
+    with auth_tab2:
+        st.subheader("Yeni Hesap Oluştur")
+        reg_user = st.text_input("Kullanıcı Adı Seçin", key="reg_u").strip().lower()
+        reg_pass = st.text_input("Şifre Belirleyin", type="password", key="reg_p")
+        reg_pass_confirm = st.text_input("Şifre Tekrar", type="password", key="reg_pc")
+        
+        if st.button("Kayıt Ol", use_container_width=True):
+            if not reg_user or not reg_pass:
+                st.warning("Alanlar boş bırakılamaz.")
+            elif reg_pass != reg_pass_confirm:
+                st.error("Şifreler birbiriyle eşleşmiyor.")
+            elif len(reg_pass) < 4:
+                st.warning("Şifre en az 4 karakter olmalıdır.")
+            else:
+                user_ref = db.collection("users").document(reg_user)
+                if user_ref.get().exists:
+                    st.error("Bu kullanıcı adı zaten alınmış. Farklı bir isim seçin.")
+                else:
+                    user_ref.set({
+                        "username": reg_user,
+                        "password_hash": hash_password(reg_pass),
+                        "created_at": firestore.SERVER_TIMESTAMP
+                    })
+                    st.session_state.logged_in_user = reg_user
+                    st.success("Hesap başarıyla oluşturuldu!")
+                    st.rerun()
+    st.stop()
+
+# ----------------- 4. OTURUM AÇILDIKTAN SONRAKİ SIDEBAR -----------------
+username = st.session_state.logged_in_user
 
 with st.sidebar:
-    st.header("👤 Kullanıcı Profili")
-    
-    username_input = st.text_input(
-        "Kullanıcı Adınız", 
-        value=st.session_state.active_username
-    ).strip().lower()
-
-    # Kullanıcı adı değişirse sıfırla ve URL'yi güncelle
-    if username_input != st.session_state.active_username:
-        st.session_state.active_username = username_input
-        st.query_params["user"] = username_input
+    st.header(f"👤 {username.capitalize()}")
+    if st.button("🚪 Çıkış Yap", use_container_width=True):
+        st.session_state.logged_in_user = None
         if "current_chat_id" in st.session_state:
             del st.session_state["current_chat_id"]
         if "messages" in st.session_state:
             del st.session_state["messages"]
         st.rerun()
 
-    username = st.session_state.active_username
-    
     st.divider()
     st.header("💬 Sohbet Geçmişi")
     
@@ -100,7 +149,7 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
 
-    # Firestore'dan kullanıcının geçmiş sohbetlerini çek
+    # Firestore'dan sadece bu kullanıcının sohbetlerini çek
     chats_ref = db.collection("users").document(username).collection("chats").order_by("created_at", direction=firestore.Query.DESCENDING)
     saved_chats = list(chats_ref.stream())
 
@@ -109,14 +158,13 @@ with st.sidebar:
         data = c.to_dict()
         chat_titles[c.id] = data.get("title", "İsimsiz Sohbet")
 
-    # Eğer aktif sohbet seçili değilse en son sohbeti aktif yap
     if "current_chat_id" not in st.session_state:
         if saved_chats:
             st.session_state.current_chat_id = saved_chats[0].id
         else:
             st.session_state.current_chat_id = f"chat_{int(datetime.now().timestamp())}"
 
-    # Sohbet Butonları ve Yanına Silme (🗑️) Butonu
+    # Sohbetler ve Silme Butonu
     for c_id, title in chat_titles.items():
         col1, col2 = st.columns([0.8, 0.2])
         button_label = f"📌 {title[:20]}" if c_id == st.session_state.current_chat_id else title[:20]
@@ -124,7 +172,6 @@ with st.sidebar:
         with col1:
             if st.button(button_label, key=f"btn_{c_id}", use_container_width=True):
                 st.session_state.current_chat_id = c_id
-                # Mesajları veritabanından yeniden okumak için session'ı temizle
                 if "messages" in st.session_state:
                     del st.session_state["messages"]
                 st.rerun()
@@ -155,10 +202,9 @@ with st.sidebar:
                     pdf_text_context += text + "\n"
         st.success(f"PDF Yüklendi! ({len(reader.pages)} sayfa)")
 
-# ----------------- 4. SOHBET VERİSİNİ VERİTABANINDAN AL -----------------
+# ----------------- 5. SOHBET VERİSİNİ YÜKLEME -----------------
 current_chat_ref = db.collection("users").document(username).collection("chats").document(st.session_state.current_chat_id)
 
-# Her sayfa açılışında veya sohbet değişiminde veritabanından çek
 if "messages" not in st.session_state or st.session_state.messages is None:
     chat_doc = current_chat_ref.get()
     if chat_doc.exists:
@@ -167,7 +213,7 @@ if "messages" not in st.session_state or st.session_state.messages is None:
     else:
         st.session_state.messages = []
 
-# ----------------- 5. ANA EKRAN & TALİMATLAR -----------------
+# ----------------- 6. ANA EKRAN & TALİMATLAR -----------------
 st.title("⚡ Elektrik-Elektronik Mühendisi Asistanı")
 st.caption(f"Aktif Kullanıcı: **{username}** | Oturum: **{st.session_state.current_chat_id}**")
 
@@ -183,7 +229,7 @@ Kurallar:
 """
 
 if pdf_text_context:
-    effective_instruction = base_system_instruction + f"\n\n[REFERANS DATASHEET / NOT]:\n{pdf_text_context[:40000]}"
+    effective_instruction = base_system_instruction + f"\n\n[REFERANS DATASHEET / NOT]:\n{pdf_text_context[:25000]}"
 else:
     effective_instruction = base_system_instruction
 
@@ -191,7 +237,7 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# ----------------- 6. MESAJ GÖNDERİMİ & AKIŞ -----------------
+# ----------------- 7. MESAJ İLETİMİ VE AKIŞ -----------------
 if user_input := st.chat_input("Teknik sorunuzu yazın..."):
     display_text = user_input
     if uploaded_image:
@@ -202,9 +248,11 @@ if user_input := st.chat_input("Teknik sorunuzu yazın..."):
     with st.chat_message("user"):
         st.markdown(display_text)
 
+    # API için son 6 mesajlık pencere oluştur (Hız optimizasyonu)
     gemini_contents = []
     last_role = None
-    for msg in st.session_state.messages:
+    recent_messages = st.session_state.messages[-6:]
+    for msg in recent_messages:
         r = "user" if msg["role"] == "user" else "model"
         if r != last_role:
             gemini_contents.append(types.Content(role=r, parts=[types.Part.from_text(text=msg["content"])]))
@@ -238,11 +286,9 @@ if user_input := st.chat_input("Teknik sorunuzu yazın..."):
 
             full_response = st.write_stream(stream_wrapper())
 
-            # Mesajları yerel oturuma ekle
             st.session_state.messages.append({"role": "user", "content": display_text})
             st.session_state.messages.append({"role": "assistant", "content": full_response})
 
-            # Firestore Veritabanına Kalıcı Kaydet
             chat_title = user_input[:30] if len(st.session_state.messages) <= 2 else chat_titles.get(st.session_state.current_chat_id, user_input[:30])
             current_chat_ref.set({
                 "title": chat_title,
