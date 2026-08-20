@@ -58,7 +58,7 @@ db = init_firebase()
 api_key = os.environ.get("GOOGLE_API_KEY")
 if not api_key:
     if "GOOGLE_API_KEY" in st.secrets:
-        api_key = st.secrets["GOOGLE_API_KEY"].strip()
+        api_key = str(st.secrets["GOOGLE_API_KEY"]).strip()
     else:
         st.error("GOOGLE_API_KEY bulunamadı. Lütfen Streamlit Secrets alanına tanımlayın.")
         st.stop()
@@ -179,7 +179,7 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# ----------------- 6. MESAJ İLETİMİ (STREAMING) -----------------
+# ----------------- 6. MESAJ İLETİMİ -----------------
 if user_input := st.chat_input("Teknik sorunuzu yazın..."):
     display_text = user_input
     if uploaded_image:
@@ -200,20 +200,31 @@ if user_input := st.chat_input("Teknik sorunuzu yazın..."):
     st.session_state.GOOGLE_history.append(types.Content(role="user", parts=parts))
 
     with st.chat_message("assistant"):
-        try:
-            def stream_generator():
-                response_stream = client.models.generate_content_stream(
-                    model="GOOGLE-2.0-flash",
-                    contents=st.session_state.GOOGLE_history,
-                    config=types.GenerateContentConfig(
-                        system_instruction=effective_instruction,
-                        temperature=0.2,
+        def stream_generator():
+            # Model isimlerini sırayla dener
+            candidate_models = ["GOOGLE-2.5-flash", "GOOGLE-2.0-flash", "GOOGLE-1.5-flash"]
+            response_stream = None
+            
+            for m_name in candidate_models:
+                try:
+                    response_stream = client.models.generate_content_stream(
+                        model=m_name,
+                        contents=st.session_state.GOOGLE_history,
+                        config=types.GenerateContentConfig(
+                            system_instruction=effective_instruction,
+                            temperature=0.2,
+                        )
                     )
-                )
-                for chunk in response_stream:
-                    if chunk.text:
-                        yield chunk.text
+                    # İlk parça çekilebiliyorsa model geçerlidir
+                    for chunk in response_stream:
+                        if chunk.text:
+                            yield chunk.text
+                    return
+                except Exception as ex:
+                    # Model format hatası aldığında bir sonraki versiyonu dener
+                    continue
 
+        try:
             full_response = st.write_stream(stream_generator())
             
             st.session_state.messages.append({"role": "assistant", "content": full_response})
