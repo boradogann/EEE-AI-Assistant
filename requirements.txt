@@ -2,3 +2,4 @@ google-genai
 streamlit
 pypdf
 pillow
+firebase-admin
