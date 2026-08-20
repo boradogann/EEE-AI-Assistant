@@ -57,10 +57,10 @@ db = init_firebase()
 # ----------------- 2. GEMINI CLIENT -----------------
 api_key = os.environ.get("GOOGLE_API_KEY")
 if not api_key:
-    if "GEMINI_API_KEY" in st.secrets:
+    if "GOOGLE_API_KEY" in st.secrets:
         api_key = str(st.secrets["GOOGLE_API_KEY"]).strip()
     else:
-        st.error("GEMINI_API_KEY bulunamadı. Lütfen Streamlit Secrets alanına tanımlayın.")
+        st.error("GOOGLE_API_KEY bulunamadı. Lütfen Streamlit Secrets alanına tanımlayın.")
         st.stop()
 
 client = genai.Client(api_key=api_key)
@@ -177,11 +177,9 @@ if user_input := st.chat_input("Teknik sorunuzu yazın..."):
     if uploaded_pdf:
         display_text = f"📄 *[Datasheet Aktif]* {display_text}"
 
-    # Ekrana bas
     with st.chat_message("user"):
         st.markdown(display_text)
 
-    # API için geçmişi temizle: Ardışık 'user' veya 'model' mesajlarını filtrele
     gemini_contents = []
     last_role = None
     for msg in st.session_state.messages:
@@ -190,22 +188,20 @@ if user_input := st.chat_input("Teknik sorunuzu yazın..."):
             gemini_contents.append(types.Content(role=r, parts=[types.Part.from_text(text=msg["content"])]))
             last_role = r
 
-    # Son kullanıcı mesajını ekle
     current_parts = []
     if uploaded_image:
         current_parts.append(types.Part.from_bytes(data=uploaded_image.getvalue(), mime_type=uploaded_image.type))
     current_parts.append(types.Part.from_text(text=user_input))
 
     if last_role == "user" and len(gemini_contents) > 0:
-        gemini_contents.pop()  # Önceki cevapsız user mesajı varsa ez
+        gemini_contents.pop()
         
     gemini_contents.append(types.Content(role="user", parts=current_parts))
 
-    # Yanıt Üretimi
     with st.chat_message("assistant"):
         try:
             response_stream = client.models.generate_content_stream(
-                model="gemini-2.0-flash",
+                model="gemini-3.6-flash",
                 contents=gemini_contents,
                 config=types.GenerateContentConfig(
                     system_instruction=effective_instruction,
@@ -220,11 +216,9 @@ if user_input := st.chat_input("Teknik sorunuzu yazın..."):
 
             full_response = st.write_stream(stream_wrapper())
 
-            # Başarılı olursa hem kullanıcıyı hem asistanı kalıcı listeye yaz
             st.session_state.messages.append({"role": "user", "content": display_text})
             st.session_state.messages.append({"role": "assistant", "content": full_response})
 
-            # Firestore Kaydı
             chat_title = user_input[:30] if len(st.session_state.messages) <= 2 else chat_titles.get(st.session_state.current_chat_id, user_input[:30])
             current_chat_ref.set({
                 "title": chat_title,
