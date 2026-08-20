@@ -84,6 +84,7 @@ with st.sidebar:
         st.session_state.active_username = username_input
         st.query_params["user"] = username_input
         st.session_state.messages = []
+        st.session_state.current_chat_id = f"chat_{int(datetime.now().timestamp())}"
         st.rerun()
 
     username = st.session_state.active_username
@@ -110,12 +111,23 @@ with st.sidebar:
         else:
             st.session_state.current_chat_id = f"chat_{int(datetime.now().timestamp())}"
 
+    # Sohbet Butonları ve Yanına Silme (🗑️) Butonu
     for c_id, title in chat_titles.items():
-        button_label = f"📌 {title[:25]}" if c_id == st.session_state.current_chat_id else title[:25]
-        if st.button(button_label, key=c_id, use_container_width=True):
-            st.session_state.current_chat_id = c_id
-            st.session_state.messages = []
-            st.rerun()
+        col1, col2 = st.columns([0.8, 0.2])
+        button_label = f"📌 {title[:20]}" if c_id == st.session_state.current_chat_id else title[:20]
+        
+        with col1:
+            if st.button(button_label, key=f"btn_{c_id}", use_container_width=True):
+                st.session_state.current_chat_id = c_id
+                st.session_state.messages = []
+                st.rerun()
+        with col2:
+            if st.button("🗑️", key=f"del_{c_id}", help="Bu sohbeti sil"):
+                db.collection("users").document(username).collection("chats").document(c_id).delete()
+                if st.session_state.current_chat_id == c_id:
+                    st.session_state.current_chat_id = f"chat_{int(datetime.now().timestamp())}"
+                    st.session_state.messages = []
+                st.rerun()
 
     st.divider()
     st.header("📁 Mühendislik Araçları")
@@ -169,7 +181,7 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# ----------------- 6. MESAJ GÖNDERİMİ & HATASIZ AKIŞ -----------------
+# ----------------- 6. MESAJ GÖNDERİMİ & AKIŞ -----------------
 if user_input := st.chat_input("Teknik sorunuzu yazın..."):
     display_text = user_input
     if uploaded_image:
