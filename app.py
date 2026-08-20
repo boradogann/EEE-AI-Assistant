@@ -18,7 +18,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Metin akarken sayfanın aşağıya kaymasını engelleyen stil
+# Sayfa kaymasını engelleyen stil
 st.markdown(
     """
     <style>
@@ -65,7 +65,7 @@ if not api_key:
 
 client = genai.Client(api_key=api_key)
 
-# ----------------- 3. KULLANICI & SOHBET GEÇMİŞİ -----------------
+# ----------------- 3. KULLANICI & URL PARAMETRESİ -----------------
 query_params = st.query_params
 url_user = query_params.get("user", None)
 
@@ -80,11 +80,14 @@ with st.sidebar:
         value=st.session_state.active_username
     ).strip().lower()
 
+    # Kullanıcı adı değişirse sıfırla ve URL'yi güncelle
     if username_input != st.session_state.active_username:
         st.session_state.active_username = username_input
         st.query_params["user"] = username_input
-        st.session_state.messages = []
-        st.session_state.current_chat_id = f"chat_{int(datetime.now().timestamp())}"
+        if "current_chat_id" in st.session_state:
+            del st.session_state["current_chat_id"]
+        if "messages" in st.session_state:
+            del st.session_state["messages"]
         st.rerun()
 
     username = st.session_state.active_username
@@ -97,6 +100,7 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
 
+    # Firestore'dan kullanıcının geçmiş sohbetlerini çek
     chats_ref = db.collection("users").document(username).collection("chats").order_by("created_at", direction=firestore.Query.DESCENDING)
     saved_chats = list(chats_ref.stream())
 
@@ -105,6 +109,7 @@ with st.sidebar:
         data = c.to_dict()
         chat_titles[c.id] = data.get("title", "İsimsiz Sohbet")
 
+    # Eğer aktif sohbet seçili değilse en son sohbeti aktif yap
     if "current_chat_id" not in st.session_state:
         if saved_chats:
             st.session_state.current_chat_id = saved_chats[0].id
@@ -119,14 +124,18 @@ with st.sidebar:
         with col1:
             if st.button(button_label, key=f"btn_{c_id}", use_container_width=True):
                 st.session_state.current_chat_id = c_id
-                st.session_state.messages = []
+                # Mesajları veritabanından yeniden okumak için session'ı temizle
+                if "messages" in st.session_state:
+                    del st.session_state["messages"]
                 st.rerun()
         with col2:
             if st.button("🗑️", key=f"del_{c_id}", help="Bu sohbeti sil"):
                 db.collection("users").document(username).collection("chats").document(c_id).delete()
                 if st.session_state.current_chat_id == c_id:
-                    st.session_state.current_chat_id = f"chat_{int(datetime.now().timestamp())}"
-                    st.session_state.messages = []
+                    if "current_chat_id" in st.session_state:
+                        del st.session_state["current_chat_id"]
+                    if "messages" in st.session_state:
+                        del st.session_state["messages"]
                 st.rerun()
 
     st.divider()
@@ -146,10 +155,11 @@ with st.sidebar:
                     pdf_text_context += text + "\n"
         st.success(f"PDF Yüklendi! ({len(reader.pages)} sayfa)")
 
-# ----------------- 4. SOHBET VERİSİNİ YÜKLEME -----------------
+# ----------------- 4. SOHBET VERİSİNİ VERİTABANINDAN AL -----------------
 current_chat_ref = db.collection("users").document(username).collection("chats").document(st.session_state.current_chat_id)
 
-if "messages" not in st.session_state or not st.session_state.messages:
+# Her sayfa açılışında veya sohbet değişiminde veritabanından çek
+if "messages" not in st.session_state or st.session_state.messages is None:
     chat_doc = current_chat_ref.get()
     if chat_doc.exists:
         data = chat_doc.to_dict()
@@ -228,9 +238,11 @@ if user_input := st.chat_input("Teknik sorunuzu yazın..."):
 
             full_response = st.write_stream(stream_wrapper())
 
+            # Mesajları yerel oturuma ekle
             st.session_state.messages.append({"role": "user", "content": display_text})
             st.session_state.messages.append({"role": "assistant", "content": full_response})
 
+            # Firestore Veritabanına Kalıcı Kaydet
             chat_title = user_input[:30] if len(st.session_state.messages) <= 2 else chat_titles.get(st.session_state.current_chat_id, user_input[:30])
             current_chat_ref.set({
                 "title": chat_title,
