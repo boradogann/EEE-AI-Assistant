@@ -143,7 +143,7 @@ if "messages" not in st.session_state or not st.session_state.messages:
 
 # ----------------- 5. ANA EKRAN & TALİMATLAR -----------------
 st.title("⚡ Elektrik-Elektronik Mühendisi Asistanı (Cloud)")
-st.caption(f"Aktif Kullanıcı: **{username}** | Oturum: **{st.session_state.current_chat_id}**")
+st.caption(f"Aktif Kullanıcı: **{username}**")
 
 base_system_instruction = """
 Sen kıdemli bir Elektrik-Elektronik Mühendisi teknik asistanısın. 
